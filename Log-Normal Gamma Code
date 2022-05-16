@@ -1,1 +1,414 @@
+---
+title: "LogNormal/Gamma Misspecification Example"
+author: "Oliver Robinson"
+date: "26 January 2022"
+output:
+  pdf_document: default
+  html_document: default
+---
 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Simulating "True" Data (Log-Normal)
+```{r true data}
+y<-rlnorm(n=10000, meanlog = 0, sdlog = 0.5)
+
+hist(y, breaks=100)
+summary(y)
+
+```
+
+Simulating B=50 bootstrapped samples
+```{r bootstrap}
+Boot.samples<-function(x, n ,B){
+  samples<-matrix(nrow=B, ncol=n)
+  for(i in 1:B){
+    samples[i,]<-sample(x, n, replace=TRUE)
+  }
+  return(samples)
+}
+
+B<-Boot.samples(y, 10000, 20)
+```
+
+First define the unnormalised, eta-generalised pdf and cdf to be:
+```{r eta generalised pdf}
+a<-2
+b<-3
+
+un.f.eta <- function(y, eta, sample){
+  n <- length(sample)
+  a.n <- a +3*n
+  b.n <- b + sum(sample)
+  c <- 1
+  d = b.n/eta
+  p = 2*eta + 1
+  q = a.n + eta - 1
+  
+  return((y/d)^(c*p - 1)/(1 + (y/d)^c)^(p+q))
+}
+
+un.F.eta<- function(q, eta, sample){
+  return(integrate(un.f.eta, lower=0, upper=q, eta=eta, sample=sample)$value)
+}
+
+f.eta <- function(y, eta, sample){
+  norm <- un.F.eta(Inf, eta, sample)
+  return(un.f.eta(y, eta, sample)/norm)
+}
+
+F.eta <- function(q, eta, sample){
+  norm <- un.F.eta(Inf, eta, sample)
+  return(un.F.eta(q, eta, sample)/norm)
+}
+```
+
+Fitting an ungeneralised gamma model to assess baseline performance:
+```{r ungeneralised gamma}
+alpha <- seq(0.01, 5, by=0.01)
+plot(dlnorm(alpha, 0, 0.5)~alpha, type="l", ylab="Density", xlab="x", main="Model Misspecification", cex.lab=1.5, cex.axis=1.5, cex.main=1.5, cex.sub=1.5)
+lines(f.eta(alpha, 1, y)~alpha, col="red")
+legend("topright", c("True Log-Normal", "Gamma"), fill=c("black", "red"), cex=1.5)
+```
+
+
+Calculating the upper-alpha quantiles for each bootstrapped sample, for a given eta:
+```{r calculating bootstrap quantiles}
+h <- function(q, eta, sample, alpha){
+  abs(F.eta(q, eta, sample) - (1 - alpha))
+}
+  
+Q.alpha<-function(eta, sample, alpha){
+  x <- optimize(h, c(0, 6), tol = 1e-10, maximum=FALSE, eta=eta, sample=sample, alpha=alpha)
+  return(x$minimum)
+}
+```
+
+Constructing Coverage Probability Function:
+```{r coverage probability function}
+cover<-function(eta, B, alpha){
+  for(i in 1:nrow(B)){
+    a[i]<-sum(y <= Q.alpha(eta, B[i,], alpha)) 
+  }
+  return(sum(a)/(nrow(B)*ncol(B)))
+}
+```
+
+Computing Optimal Eta value by setting c_alpha(eta) = 1 - alpha, i.e. calibrating coverage probability.
+```{r computing optimal eta}
+k_abs <- function(eta, B, alpha){
+  return(abs(cover(eta, B, alpha) - (1 - alpha)))
+}
+
+#alpha1<-seq(0.001, 0.05, by=0.001)
+#alpha2<-seq(0.06, 0.95, by=0.01)
+#alpha3<-seq(0.951, 0.999, by=0.001)
+#alpha <- c(alpha1, alpha2, alpha3)
+
+alpha <- seq(0.01, 0.99, by=0.01)
+eta<-rep(0, length(alpha))
+cov_prob<-rep(0, length(alpha))
+
+#We compute eta in two seperate steps: with different limits on possible eta values in each one
+for(i in 1:81){
+    #print(i)
+    #print(alpha[i])
+    eta[i] <- optimize(k_abs, c(0.1, 1.5), tol = 1e-10, maximum=FALSE, B=B, alpha=alpha[i])$minimum
+    #print(eta[i])
+    #print(1-cover(eta[i], B, alpha[i]))
+    cov_prob[i]<-cover(eta[i], B, alpha[i])
+}
+for(i in 82:length(alpha)){
+    #print(i)
+    #print(alpha[i])
+    eta[i] <- optimize(k_abs, c(0.1, 10), tol = 1e-10, maximum=FALSE, B=B, alpha=alpha[i])$minimum
+    #print(eta[i])
+    #print(1-cover(eta[i], B, alpha[i]))
+    cov_prob[i]<-cover(eta[i], B, alpha[i])
+}
+```
+
+Assessing performance of our choices of eta:
+```{r performance of eta}
+plot(alpha, eta, main=bquote("Estimated" ~ eta ~ "Values"), ylab=bquote(eta), xlab=bquote(alpha), cex.lab=1.5, cex.main=1.5, cex.sub=1.5, cex.axis=1.5)
+
+plot(1-alpha, cov_prob, xlab=expression(1-alpha), ylab="Estimated Coverage Probability", main="Calibration of Coverage Probability with Desired Level", cex.lab=1.5, cex.axis=1.5,cex.main=1.5, cex.sub=1.5)
+
+plot(1-alpha, cov_prob-(1-alpha))
+```
+Plotting Log-normal vs eta-generalised pdf:
+```{r}
+alpha <- seq(0.01,5, by=0.01)
+plot(f.eta(alpha, 1, y)~alpha, type="l")
+plot(density(y), ylim=c(0,3))
+lines(f.eta(alpha, 10, y)~alpha, col="red")
+lines(f.eta(alpha, 3.5, y)~alpha, col="blue")
+
+#Comparing eta generalised quantiles vs empirical quantiles
+alpha <- seq(0.01, 0.99, by=0.01)
+q <- quantile(y, probs=1-alpha)
+plot(1-alpha, q, type="l")
+
+bootstrap_quantiles<-rep(0, length(alpha))
+for(i in 1:length(alpha)){
+  for(j in 1:nrow(B)){
+  bootstrap_quantiles[i]<-bootstrap_quantiles[i]+Q.alpha(eta[75], B[j,], alpha[i])
+  }
+  bootstrap_quantiles[i]<-bootstrap_quantiles[i]/nrow(B)
+}
+lines(1-alpha, bootstrap_quantiles, col="red")
+abline(v=0.25)
+```
+
+Plotting Examples of Eta-generalised distributions Chosen for specific alpha values:
+```{r examples of eta}
+alpha <- seq(0.01, 5, by=0.01)
+plot(dlnorm(alpha, 0, 0.5)~alpha, type="l", ylab="Density", xlab="x", main=bquote(eta~"- Generalised Gamma Distribution for" ~ alpha==0.4), cex.lab=1.5, cex.axis=1.5, cex.main=1.5, cex.sub=1.5)
+#plot(density(y1), ylim=c(0,0.9))
+lines(f.eta(alpha, 1, y)~alpha, col="red")
+lines(f.eta(alpha, eta[40], y)~alpha, col="blue")
+abline(v=q[40], col="green")
+legend("topright", c("True Log-Normal", "Gamma", expression(eta~"- Generalised Gamma"), "Upper 40% Quantile"), fill=c("black", "red", "blue", "green"), cex=1.5)
+
+plot(dlnorm(alpha, 0, 0.5)~alpha, type="l", ylab="Density", xlab="x", main=bquote(eta~"- Generalised Gamma Distribution for" ~ alpha==0.7), cex.lab=1.5, cex.axis=1.5, cex.main=1.5, cex.sub=1.5)
+#plot(density(y1), ylim=c(0,0.9))
+lines(f.eta(alpha, 1, y)~alpha, col="red")
+lines(f.eta(alpha, eta[70], y)~alpha, col="blue")
+abline(v=q[70], col="green")
+legend("topright", c("True Log-Normal", "Gamma", expression(eta~"- Generalised Gamma"), "Upper 70% Quantile"), fill=c("black", "red", "blue", "green"), cex=1.5)
+
+plot(dlnorm(alpha, 0, 0.5)~alpha, type="l", ylim=c(0,1.7), ylab="Density", xlab="x", main=bquote(eta~"- Generalised Gamma Distribution for" ~ alpha==0.9), cex.lab=1.5, cex.axis=1.5, cex.main=1.5, cex.sub=1.5)
+#plot(density(y1), ylim=c(0,0.9))
+lines(f.eta(alpha, 1, y)~alpha, col="red")
+lines(f.eta(alpha, eta[90], y)~alpha, col="blue")
+abline(v=q[90], col="green")
+legend("topright", c("True Log-Normal", "Gamma", expression(eta~"- Generalised Gamma"), "Upper 90% Quantile"), fill=c("black", "red", "blue", "green"), cex=1.5)
+```
+
+Computing eta values when we have a much smaller sample size (n=200). Then we perform smoothing to account for this. Note: we would adjust our y variable to ensure it has 200 observations before computing this.
+```{r}
+#we consider the two sections separately
+#n changes the point at which we split
+n<-81
+
+alpha <- seq(0.01,0.99, by=0.01)
+
+eta1_spline<- smooth.spline(alpha[1:n], eta[1:n], df=6)
+eta1_smooth<-predict(eta1_spline, alpha[1:n])$y
+
+plot(eta[1:n]~alpha[1:n], ylab=expression(eta), xlab=expression(alpha), cex.axis=1.5, cex.lab=1.5)
+lines(eta1_smooth~alpha[1:n], col="red")
+
+eta2_spline<- smooth.spline(alpha[(n+1):length(alpha)], eta[(n+1):length(alpha)], df=5)
+eta2_smooth<-predict(eta2_spline, alpha[(n+1):length(alpha)])$y
+
+plot(alpha[(n+1):length(alpha)], eta[(n+1):length(alpha)], ylab=expression(eta), xlab=expression(alpha), cex.axis=1.5, cex.lab=1.5)
+lines(eta2_smooth~alpha[(n+1):length(alpha)], col="red")
+
+eta.smooth <- c(eta1_smooth, eta2_smooth)
+
+cov_prob.smooth <- c()
+for(i in 1:length(alpha)){
+cov_prob.smooth[i] <- cover(eta.smooth[i], B, alpha[i])
+}
+```
+
+Compute bootstrap estimates of quantiles for each alpha corresponding to the eta value chosen.
+```{r}
+alpha <-seq(0.01,0.99, by=0.01)
+
+bootstrap_quantiles<-rep(0, length(alpha))
+for(i in 1:length(alpha)){
+  for(j in 1:nrow(B)){
+  bootstrap_quantiles[i]<-bootstrap_quantiles[i]+Q.alpha(eta[i], B[j,], alpha[i])
+  }
+  bootstrap_quantiles[i]<-bootstrap_quantiles[i]/nrow(B)
+}
+
+bootstrap_quantiles.smooth<-rep(0, length(alpha))
+for(i in 1:length(alpha)){
+  for(j in 1:nrow(B)){
+  bootstrap_quantiles.smooth[i]<-bootstrap_quantiles.smooth[i]+Q.alpha(eta.smooth[i], B[j,], alpha[i])
+  }
+  bootstrap_quantiles.smooth[i]<-bootstrap_quantiles.smooth[i]/nrow(B)
+}
+
+#alpha <- seq(0.01, 0.99, by=0.01)
+q <- quantile(y, probs=1-alpha)
+plot(1-alpha, q)
+points(1-alpha, bootstrap_quantiles, col="red")
+
+plot(1-alpha, bootstrap_quantiles)
+lines(1-alpha, bootstrap_quantiles.smooth, col="red")
+plot(bootstrap_quantiles - bootstrap_quantiles.smooth)
+```
+
+We sample theta star from the posterior distribution as follows:
+```{r theta.star}
+a <- 2
+b <- 3
+a.n <- a + 3*length(y)
+b.n <- b + sum(y)
+
+theta.star <- rgamma(10000, shape = a.n, rate = b.n)
+```
+
+We now use this value of theta.star to sample x from a Gamma(3, theta.star) distribution.
+```{r}
+x <- c()
+for(i in 1:length(theta.star)){
+  x<-c(x, rgamma(1, shape = 3, rate = theta.star[i]))
+}
+x <-sort(x)
+
+hist(x, breaks=50)
+```
+
+Then, we see which quantiles are closest, which give us alpha values which can then be used to calculate the associated weight for x.
+```{r}
+#Finding nearest quantiles to a sample x
+nearest.quant<-function(x){
+  which.min(abs(x-bootstrap_quantiles))
+}
+
+nearest.Q<-function(x){
+  j<-nearest.quant(x)
+  
+  if(j==length(alpha)){
+    k<-j-1
+  }
+  else if(x - bootstrap_quantiles[j] >=0){
+    k<-j+1
+  }
+  else{k<-j+1}
+  return(sort(c(j,k))[1])
+}
+
+nearest.quant.smooth<-function(x){
+  which.min(abs(x-bootstrap_quantiles.smooth))
+}
+
+nearest.Q.smooth<-function(x){
+  j<-nearest.quant.smooth(x)
+  
+  if(j==length(alpha)){
+    k<-j-1
+  }
+  else if(x - bootstrap_quantiles.smooth[j] >=0){
+    k<-j+1
+  }
+  else{k<-j+1}
+  return(sort(c(j,k))[1])
+}
+```
+
+We first compute the function f, our estimate of the density of the underlying distribution:
+```{r}
+alpha <- seq(0.01,0.99, by=0.01)
+
+f_x <- rep(0, length(alpha))
+for(i in 1:length(alpha)-1){
+  f_x[i]<-abs((cov_prob[i+1]-cov_prob[i])/(bootstrap_quantiles[i+1]-bootstrap_quantiles[i]))
+}
+
+f_x.smooth <- rep(0, length(alpha))
+for(i in 1:length(alpha)-1){
+  f_x.smooth[i]<-abs((cov_prob.smooth[i+1]-cov_prob.smooth[i])/(bootstrap_quantiles.smooth[i+1]- bootstrap_quantiles.smooth[i]))
+}
+```
+
+Define g, our proposal distribution:
+```{r}
+g <- function(x){
+ f.eta(x, 1, y)
+}
+g_x<-rep(0, length(alpha))
+for(i in 1:length(alpha)-1){
+  g_x[i]<- g(bootstrap_quantiles[i])
+}
+
+g_x.smooth<-rep(0, length(alpha))
+for(i in 1:length(alpha)-1){
+  g_x.smooth[i]<- g(bootstrap_quantiles.smooth[i])
+}
+```
+
+
+We now compute the weight function w. We also compute a smoothed version of the weight function:
+```{r}
+#Now we compute weight function by dividing f by g...
+w <- function(x){
+  f_x[nearest.Q(x)]/g_x[nearest.Q(x)] 
+}
+
+w_x <- rep(0, length(x))
+for(i in 1:length(x)){
+  w_x[i]<- f_x[nearest.Q(x[i])] / g_x[nearest.Q(x[i])]
+}
+
+w_x.smooth <-rep(0, length(x))
+for(i in 1:length(x)){
+  w_x.smooth[i]<- f_x.smooth[nearest.Q.smooth(x[i])] / g_x.smooth[nearest.Q.smooth(x[i])]
+}
+
+#Spline smoothed weights
+f_w_spline<- smooth.spline(x,w_x, df=6)
+w_x_spline<-abs(predict(f_w_spline, x)$y)
+
+plot(w_x ~ x, ylab="Weight", cex.lab=1.5, cex.axis=1.5, ylim=c(0,3))
+lines(w_x_spline ~ x, col="red")
+
+f_w_smooth.spline<- smooth.spline(x,w_x.smooth, df=6)
+w_x_smooth.spline<-abs(predict(f_w_smooth.spline, x)$y)
+
+plot(w_x.smooth ~ x, ylim=c(0,3))
+lines(x,w_x_smooth.spline, col="red")
+
+```
+
+Now, we can resample our generated realisations. We consider the smoothed and non-smoothed weights separately:
+```{r weight function}
+# Resampled data
+x_resampld <- sample(x, 10000, replace = TRUE, prob = w_x)
+x_resampld_spline <- sample(x, 10000, replace = TRUE, prob = w_x_spline)
+
+x_resampld.smooth <- sample(x, 10000, replace=TRUE, prob=w_x.smooth)
+x_resampld.smooth.spline <- sample(x, 10000, replace=TRUE, prob=w_x_smooth.spline)
+
+alpha <- seq(0.01, 5, by=0.01)
+ydens <- density(y)
+xdens <- density(x)
+true.dens <- dlnorm(xdens$x, 0, 0.5)
+
+x_re_dens <- density(x_resampld)
+x_re_dens_spline <- density(x_resampld_spline)
+x_re_dens_smooth <- density(x_resampld.smooth)
+x_re_dens_smooth.spline <- density(x_resampld.smooth.spline)
+
+mean(x)
+mean(x_resampld)
+mean(x_resampld_spline)
+mean(y)
+
+#hist(y, freq=FALSE, ylim=c(0,1), breaks=100)
+alpha <- seq(0.01, 5, by=0.01)
+plot(dlnorm(alpha, 0, 0.5)~alpha, ylim=c(0,1), type="l", ylab="Density", xlab="x", main="Model Misspecification Correction", cex.lab=1.5, cex.axis=1.5, cex.main=1.5, cex.sub=1.5)
+lines(xdens, col="red")
+lines(x_re_dens, col='blue')
+#lines(x_re_dens_spline, col='green')
+#lines(x_re_dens_smooth, col="yellow")
+lines(x_re_dens_smooth.spline, col="green")
+#lines(ydens, col='blue')
+#legend("topright", c("True Log-Normal", "Standard Gamma", "Weighted Gamma"), fill=c("black", "red", "blue"))
+legend("topright", c("True Log-Normal", "Standard Gamma", "Raw-Weighted Gamma", "Smoothly Weighted Gamma"), fill=c("black", "red", "blue", "green"))
+
+#Next, we compute the Kullback Leibler Divergence to assess fit:
+library(LaplacesDemon)
+KLD(xdens$y, dlnorm(xdens$x, 0, 0.5))$intrinsic.discrepancy
+KLD(x_re_dens$y, dlnorm(x_re_dens$x, 0, 0.5))$intrinsic.discrepancy
+KLD(x_re_dens_spline$y,dlnorm(x_re_dens_spline$x, 0, 0.5))$intrinsic.discrepancy
+KLD(x_re_dens_smooth$y, dlnorm(x_re_dens_smooth$x, 0, 0.5))$intrinsic.discrepancy
+KLD(x_re_dens_smooth.spline$y, dlnorm(x_re_dens_smooth.spline$x, 0, 0.5))$intrinsic.discrepancy
+```
