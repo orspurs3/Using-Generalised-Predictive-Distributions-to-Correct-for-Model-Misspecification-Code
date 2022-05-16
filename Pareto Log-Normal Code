@@ -1,1 +1,387 @@
+---
+title: "Pareto Log-Normal"
+author: "Oliver Robinson"
+date: "23 March 2022"
+output: pdf_document
+---
 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Simulating "True" (Empirical) Pareto data:
+```{r pareto data}
+library(Pareto)
+y <- rPareto(200,1,2)
+y <- y-1
+hist(y, breaks=100)
+```
+
+Simulating Bootstrapped Samples from Empirical Data
+```{r bootstrap}
+Boot.samples<-function(x, n ,B){
+  samples<-matrix(nrow=B, ncol=n)
+  for(i in 1:B){
+    samples[i,]<-sample(x, n, replace=TRUE)
+  }
+  return(samples)
+}
+B<-Boot.samples(y, 200, 20)
+```
+
+After some analytical calculations, we can write an expression for the unnormalised log-likelihood and cdf of an eta-generalised log-normal distribution (could be an idea to use log-likelihood as values of likelihood become very small for large n).
+We then normalise these distributions.
+Note we assume the prior is a normal gamma distribution with hyperparameters (0,1,0.5,0.5)
+```{r pdf/cdf of generalised log-normal}
+un.f.eta <- function(x, eta, sample){
+  n <- length(sample)
+  mu0.dash <- sum(log(sample))/(n+1)
+  nu.dash <- n+1
+  alpha.dash <- (n+1)/2
+  beta.dash <- 0.5 + 0.5*sum((log(sample)-mean(log(sample)))^2) + n/(2*(n+1))*mean(log(sample))^2
+  
+  mu0.star <- (eta*log(x) + nu.dash*mu0.dash)/(eta + nu.dash)
+  nu.star <- eta + nu.dash
+  alpha.star <- (eta + n + 1)/2
+  beta.star <- 0.5*(2*beta.dash + eta*log(x)^2 + nu.dash*mu0.dash^2) - (eta*log(x) + nu.dash*mu0.dash)^2/(eta + nu.dash)
+  
+  y <- log(x)
+  
+  c1 <- eta*nu.dash/(2*(eta + nu.dash))
+  c2 <- -mu0.dash^2 + (2*beta.dash*(eta + nu.dash) + nu.dash*(mu0.dash^2)*(eta+nu.dash) - nu.dash^2*mu0.dash^2)/(eta*nu.dash)
+  
+  return(beta.star^(-alpha.star))
+  #return((c1*((y - mu0.dash)^2 + c2))^(-0.5*(eta + n + 1)))
+  
+}
+un.F.eta <- function(q, eta, sample){
+  return(integrate(un.f.eta, lower=0, upper=q, eta=eta, sample=sample, abs.tol=1e-10)$value)
+}
+f.eta <- function(x, eta, sample){
+  norm <- un.F.eta(Inf, eta, sample)
+  un.f.eta(x, eta, sample)/norm
+}
+F.eta <- function(q, eta, sample){
+  norm <- un.F.eta(Inf, eta, sample)
+  un.F.eta(q, eta, sample)/norm
+}
+```
+
+Plotting shape of Pareto vs LogNormal distributions. From this we can see that there is no hope of calibrating the distributions for the initial quantiles, as the distributions exhibit significantly different densities for these values. However, it is possible to achieve some calibration for the tails and that is what we will focus on.
+```{r shape of pareto vs log-normal}
+alpha <- seq(0, 5, by=0.01)
+lnorm <- un.f.eta(alpha, 1, y)
+
+n.lnorm <- f.eta(alpha,1,y)
+plot(alpha, n.lnorm, type="l", ylab="Density", xlab="x", main="Model Misspecification", cex.axis=1.5, cex.main=1.5, cex.lab=1.5, col="red")
+legend("topright", c("True Pareto", "Log-Normal"), fill=c("black", "red"), cex=1.5)
+
+par <- dPareto(alpha+1, 1,2)
+lines(alpha, par, col="black")
+
+plot(alpha, un.f.eta(alpha, 1, y), type="l")
+
+
+c<-un.f.eta(0.01, 1, y)
+integrate(un.f.eta, lower=0, upper=Inf, eta=1, sample=y)
+```
+
+
+Calculating the upper-alpha quantiles for each bootstrapped sample, for a given eta:
+```{r boostrapped quantiles}
+h <- function(q, eta, sample, alpha){
+  abs(F.eta(q, eta, sample) - (1 - alpha))
+}
+  
+Q.alpha<-function(eta, sample, alpha){
+  #make the interval a function of eta?
+  x <- optimize(h, c(0, 20), tol = 1e-10, maximum=FALSE, eta=eta, sample=sample, alpha=alpha)
+  return(x$minimum)
+}
+```
+Coverage Probability Function (Note we could replace y here with some kind of testing dataset - i.e. a set which doesn't contain values also contained in the bootstrapped sample)
+```{r coverage probability}
+a<-c()
+cover<-function(eta, B, alpha){
+  for(i in 1:nrow(B)){
+    a[i]<-sum(y <= Q.alpha(eta, B[i,], alpha)) 
+  }
+  return(sum(a)/(nrow(B)*length(y)))
+}
+alpha <- seq(0.01,0.99, by=0.01)
+```
+
+Computing Optimal Eta value by setting c_alpha(eta) = 1 - alpha, i.e. calibrating coverage probability:
+```{r computing optimal eta}
+k_abs <- function(eta, B, alpha){
+  return(abs(cover(eta, B, alpha) - (1 - alpha)))
+}
+#B<-Boot.samples(y, 100, 1)
+alpha <- seq(0.01, 0.99, by=0.01)
+eta<-rep(0, length(alpha))
+cov_prob<-rep(0, length(alpha))
+for(i in 1:length(eta)){
+    eta[i] <- optimize(k_abs, c(0.1, 5), tol = 1e-10, maximum=FALSE, B=B, alpha=alpha[i])$minimum
+    
+    cov_prob[i]<-cover(eta[i], B, alpha[i])
+}
+
+#Assessing Performance of our chosen eta values
+plot(1-alpha, cov_prob, xlab=expression(1-alpha), ylim=c(0,1), ylab="Estimated Coverage Probability", main="Estimated Coverage Probability", cex.axis=1.5, cex.main=1.5, cex.lab=1.5)
+abline(a=0,b=1, col="red")
+plot(1-alpha, eta, xlab=expression(1 -alpha), ylab=expression(eta), main=bquote("Estimated" ~ eta ~ "Values"), cex.axis=1.5, cex.main=1.5, cex.lab=1.5)
+plot(1-alpha, 1-alpha-cov_prob, xlab=expression(1 - alpha), ylab="Estimated Coverage Error", main="Estimated Coverage Error", cex.axis=1.5, cex.main=1.5, cex.lab=1.5)
+abline(h=0, col="red")
+```
+
+From these results it appears that the calibration works better for the right tail of the distribution (Note that alpha refers to the 'upper-alpha' quantile). It does not appear to be calibrating particularly effectively for the earlier quantiles (where most of the density is concentrated).
+
+We can smooth these eta values as follows:
+```{r smoothing eta values}
+eta_spline <- smooth.spline(alpha, eta, df=6)
+eta_smooth <- predict(eta_spline, alpha)$y
+
+plot(1-alpha, eta, ylab=expression(eta), xlab=expression(1-alpha), main=bquote("Smoothed" ~ eta ~ "Values"), cex.axis=1.5, cex.main=1.5, cex.lab=1.5)
+lines(1-alpha, eta_smooth, col="red")
+```
+Plots demonstrating the effect each chosen eta value has on the shape of the predictive distribution.
+```{r}
+alpha<-seq(0.01,0.99, by=0.01)
+q<-quantile(y, probs=1-alpha)
+
+alpha <- seq(0.01, 5, by=0.01)
+plot(dPareto(alpha+1, 1,2)~ alpha, type="l")
+
+lines(f.eta(alpha, 1, B[1,])~alpha, col="red")
+lines(f.eta(alpha, eta[5], B[1,])~alpha, col="blue")
+abline(v=q[5], col="green")
+```
+
+We now compute bootstrapped estimates of each upper-alpha quantile given each corresponding eta value chosen by the above algorithm:
+```{r estimating bootstrapped quantiles}
+alpha <- seq(0.01, 0.99, by=0.01)
+bootstrap_quantiles<-rep(0, length(alpha))
+for(i in 1:length(alpha)){
+  for(j in 1:nrow(B)){
+  bootstrap_quantiles[i]<-bootstrap_quantiles[i]+Q.alpha(eta[i], B[j,], alpha[i])
+  }
+  bootstrap_quantiles[i]<-bootstrap_quantiles[i]/nrow(B)
+}
+```
+
+We now plot the bootstrapped quantiles:
+```{r}
+plot(1-alpha, bootstrap_quantiles)
+
+boot_spline <- smooth.spline(1-alpha, bootstrap_quantiles, df=6)
+boot_smooth <- predict(boot_spline, 1-alpha)$y
+
+lines(1-alpha, boot_smooth, col="red")
+```
+
+Assessing performance of bootstrapped quantiles relative to observed quantiles:
+```{r assessing bootstrapped quantiles}
+alpha <- seq(0.01, 0.99, by=0.01)
+q <- quantile(y, probs=1-alpha)
+plot(1-alpha, q, ylim=c(0,10))
+points(1-alpha, boot_smooth, col="red")
+points(1-alpha, bootstrap_quantiles, col="green")
+Pq <- qPareto(1-alpha, 1, 2) - 1
+lines(1-alpha, Pq)
+```
+
+Sampling Using observatons from our proposal using a Metropolis Hastings Algorithm:
+```{r}
+MetropolisHastings <- function(n,Sigma, x0){
+    X <- matrix(0,nrow=1,ncol=n)
+    X[1] <- x0
+    U <- runif(n)
+    for(i in 2:n) {
+        Y <- abs(X[i-1] + rnorm(1, mean=0, sd=Sigma))
+        alpha <- min(1,g(Y)/g(X[i-1]))
+        if(U[i] < alpha) {
+            X[i] <- Y
+        } else {
+            X[i] <- X[i-1]
+        }
+    }
+    return(X)
+}
+X<-MetropolisHastings(n=200000, Sigma=0.1, x0=1)
+hist(X)
+hist(X[50001:200000], freq=FALSE, breaks=100)
+lines(alpha2, g(alpha2), col="red")
+
+sample<-X[50001:200000]
+```
+
+To illustrate the misspecification, we can plot the lognormal predictive distribution against the Pareto and see the difference as follows: 
+
+```{r pareto vs lognormal predictive}
+hist(sample, breaks=100, freq=FALSE)
+alpha <- seq(0.01, max(sample), by=0.01)
+par <- dPareto(alpha+1, 1,2)
+lines(alpha, par, col="red")
+```
+
+For a given sample x, we need to calculate which two quantiles x falls between. This then allows us to produce an estimate of the weight function:
+```{r finding nearest quantiles}
+#Finding nearest quantiles to a sample x
+nearest.quant<-function(x){
+  which.min(abs(x-bootstrap_quantiles))
+}
+#This finds the nearest quantile less than x
+nearest.Q<-function(x){
+  j<-nearest.quant(x)
+  
+  if(j==length(bootstrap_quantiles)){
+    k<-j-1
+  }
+  else if(x - bootstrap_quantiles[j] >=0){
+    k<-j+1
+  }
+  else{k<-j+1}
+  return(sort(c(j,k))[1])
+}
+
+nearest.Q.smooth<-function(x){
+  j<-nearest.quant(x)
+  
+  if(j==length(boot_smooth)){
+    k<-j-1
+  }
+  else if(x - boot_smooth[j] >=0){
+    k<-j+1
+  }
+  else{k<-j+1}
+  return(sort(c(j,k))[1])
+}
+```
+
+We now compute our estimate of f, the true underlying data distribution (using F). We compare using the smooth vs non smooth bootstrap quantiles.
+```{r, eval=FALSE}
+alpha<-seq(0.01,0.99, by=0.01)
+
+f <- function(x){
+  u <- nearest.Q(x) + 1
+  l <- nearest.Q(x) 
+ 
+  abs((cov_prob[u]-cov_prob[l])/(bootstrap_quantiles[u]-bootstrap_quantiles[l]))
+}
+
+f_x <- rep(0, length(alpha))
+for(i in 1:length(alpha)-1){
+  f_x[i]<-abs((cov_prob[i+1]-cov_prob[i])/(bootstrap_quantiles[i+1]-bootstrap_quantiles[i]))
+}
+
+f.smooth <- function(x){
+  u <- nearest.Q.smooth(x) + 1
+  l <- nearest.Q.smooth(x) 
+ 
+  abs((cov_prob[u]-cov_prob[l])/(boot_smooth[u]-boot_smooth[l]))
+}
+
+f_x_smooth <- rep(0, length(alpha))
+for(i in 1:length(alpha)-1){
+  f_x_smooth[i]<-abs((cov_prob[i+1]-cov_prob[i])/(boot_smooth[i+1]-boot_smooth[i]))
+}
+
+x1<-c()
+for(i in 1:length(alpha)){
+  x1 <- c(x1, Q.alpha(1, y, alpha[i]))
+}
+plot(x1 ,f_x, xlim=c(0,15), ylim=c(0,2), ylab="f(x)", xlab="x", main="Estimate of the Target Density", cex.axis=1.5, cex.lab=1.5, cex.main=1.5, cex.sub=1.5)
+#lines(density(y), col="blue")
+
+alpha2 <- seq(0.01, 15, by=0.01)
+par <- dPareto(alpha2+1, 1,2)
+lines(alpha2, par, col="red")
+
+#Spline Function
+spline.f.fn <- smooth.spline(x1, f_x, df=6)
+spline.f <- function(x){
+  predict(spline.f.fn, x)$y
+}
+
+lines(x1, spline.f(x1), col="blue")
+legend("topright", c("True Pareto Density", "Smooth Fitted Function"), fill=c("red", "blue"), cex=1.5)
+
+x.smooth<-c()
+for(i in 1:length(alpha)){
+  x.smooth <- c(x.smooth, Q.alpha(1, y, alpha[i]))
+}
+plot(x.smooth ,f_x_smooth, xlim=c(0,5))
+lines(density(y), col="blue")
+alpha2 <- seq(0.01, 10, by=0.01)
+par <- dPareto(alpha2+1, 1,2)
+lines(alpha2, par, col="red")
+
+plot(x1, spline.f(x1))
+```
+
+The weight function is therefore given by:
+```{r weight function, eval=FALSE}
+x<-sample
+
+g <- function(x){
+ f.eta(x, 1, y)
+}
+
+x2<-seq(0.01, 12, by=0.01)
+
+w_x <- rep(0, length(x2))
+for(i in 1:length(x2)){
+  w_x[i]<- spline.f(x2[i]) / g(x2[i])
+}
+
+#Fitting a smooth function through the weights:
+
+w_x_spline <- smooth.spline(x2, w_x, df=8)
+w_x_smooth <- predict(w_x_spline, x2)$y
+
+smooth_weight<-data.frame(x2, w_x_smooth)
+smooth_weight<-smooth_weight[order(smooth_weight[,1]),]
+
+plot(x2, w_x, ylab="Estimated Weight", xlab="x", main="Estimated Weights for Simulated Realisations", cex.main=1.5, cex.sub=1.5, cex.lab=1.5, cex.axis=1.5)
+#lines(smooth_weight$x2, smooth_weight$w_x_smooth, col="red")
+
+weight.f<- function(x){
+  spline.f(x)/g(x)
+}
+x3<-seq(0.01,12, by=0.01)
+
+plot(x3, spline.f(x3))
+plot(x3, g(x3))
+```
+
+We can now produce a weighted sample using resampling:
+```{r resampling, eval=FALSE}
+x<-sample
+alpha2 <- seq(0.01, 12, by=0.01)
+par <- dPareto(alpha2+1, 1, 2)
+hist(x, breaks=100, freq=FALSE, xlim=c(2,12), ylim=c(0,0.2), main="Histogram of Sample Values", ylab="Density", xlab="x", cex.axis=1.5, cex.main=1.5, cex.lab=1.5)
+lines(alpha2, par, col="blue")
+
+w_x<-weight.f(x)
+
+x_resampled <- sample(x, 100000, replace = TRUE, prob = w_x)
+hist(x_resampled, breaks=100, freq=FALSE, xlim=c(2,12), ylim=c(0,0.2), main="Histogram of Resampled Values", ylab="Density", xlab="x", cex.axis=1.5, cex.main=1.5, cex.lab=1.5)
+lines(alpha2, par, col="blue")
+
+plot(density(x), ylab="Density", xlab="x", main="Density of Simulated Realisations", cex.axis=1.5, cex.main=1.5, cex.lab=1.5, ylim=c(0, 1.5), xlim=c(0,7))
+lines(alpha2, par, col="blue")
+#lines(alpha2, g(alpha2), col="green")
+
+lines(density(x_resampled), col="red")
+legend("topright", c("Unweighted Proposals", "Weighted Proposals"), fill=c("black", "red"), cex=1.5)
+
+#We can assess how effectively our samples correspond to the target distribution for x values between 2 and 9 by computing the Kullback-Leibler Divergence:
+library(LaplacesDemon)
+
+sample.density <- density(x)
+resampled.density <- density(x_resampled)
+optimal.density <- dPareto(resampled.density$x[90:300]+1,1,2)
+
+KLD(resampled.density$y[90:300], optimal.density)$intrinsic.discrepancy
+KLD(sample.density$y[90:300], optimal.density)$intrinsic.discrepancy
+```
